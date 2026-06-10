@@ -449,6 +449,291 @@ for i in range(num_equations):
 # 保存当前数据到session state
 st.session_state.equations_data = equations_data
 
+# 用户答案输入区域
+st.markdown("---")
+st.subheader("✍️ 请输入你的答案（可选，留空直接看解答）")
+
+# 初始化答案相关session state
+if 'user_answers' not in st.session_state:
+    st.session_state.user_answers = {}
+if 'free_vars_selected' not in st.session_state:
+    st.session_state.free_vars_selected = []
+if 'feedback_message' not in st.session_state:
+    st.session_state.feedback_message = ""
+if 'feedback_color' not in st.session_state:
+    st.session_state.feedback_color = ""
+
+# 创建答案输入框
+answer_cols = st.columns(num_variables)
+user_answers = {}
+for j in range(num_variables):
+    var_key = f"answer_var_{j}"
+    answer = answer_cols[j].text_input(
+        f"{var_names[j]} =",
+        value=st.session_state.user_answers.get(j, ""),
+        key=var_key,
+        placeholder="输入分数或小数"
+    )
+    user_answers[j] = answer.strip()
+
+# 自由变量复选框
+st.markdown("**勾选自由变量：**")
+free_var_cols = st.columns(num_variables)
+free_vars_selected = []
+for j in range(num_variables):
+    free_key = f"free_var_{j}"
+    is_free = free_var_cols[j].checkbox(
+        f"{var_names[j]} 是自由变量",
+        value=j in st.session_state.free_vars_selected,
+        key=free_key
+    )
+    if is_free:
+        free_vars_selected.append(j)
+
+# 系数输入框（当有自由变量时显示）
+coefficient_entries = {}
+if free_vars_selected:
+    st.markdown("**请输入各主元变量的系数表达式：**")
+    
+    # 找出非自由变量（主元变量）
+    pivot_vars = [j for j in range(num_variables) if j not in free_vars_selected]
+    
+    for pivot_idx in pivot_vars:
+        st.markdown(f"\n**{var_names[pivot_idx]} = **")
+        coeff_cols = st.columns(len(free_vars_selected) + 1)
+        
+        coefficient_entries[pivot_idx] = {}
+        
+        # 每个自由变量的系数
+        for i, free_idx in enumerate(free_vars_selected):
+            coeff_key = f"coeff_{pivot_idx}_{free_idx}"
+            coeff_value = coeff_cols[i].number_input(
+                f"{var_names[free_idx]} 的系数",
+                value=0.0,
+                step=1.0,
+                format="%.2f",
+                key=coeff_key
+            )
+            coefficient_entries[pivot_idx][free_idx] = coeff_value
+        
+        # 常数项
+        const_key = f"const_{pivot_idx}"
+        const_value = coeff_cols[-1].number_input(
+            "常数项",
+            value=0.0,
+            step=1.0,
+            format="%.2f",
+            key=const_key
+        )
+        coefficient_entries[pivot_idx]['const'] = const_value
+
+# 提交答案、显示答案、无解按钮
+col_submit, col_show, col_no_solution = st.columns(3)
+
+with col_submit:
+    if st.button("✅ 提交答案", type="primary", use_container_width=True):
+        # 检查是否有解的结果
+        if 'solution_result' not in st.session_state:
+            st.warning("请先点击'求解方程组'按钮！")
+        else:
+            # 获取之前求解的结果
+            try:
+                matrix = []
+                constants = []
+                for eq_data in equations_data:
+                    matrix.append(eq_data['coeffs'])
+                    constants.append(eq_data['const'])
+                
+                augmented, pivot_cols, steps = gauss_elimination(matrix, constants)
+                n = len(matrix)
+                m = len(matrix[0])
+                rank = len(pivot_cols)
+                
+                # 检查是否有解
+                has_contradiction = False
+                if not is_homogeneous:
+                    for i in range(rank, n):
+                        if augmented[i][-1] != 0:
+                            has_contradiction = True
+                            break
+                
+                # 如果无解
+                if has_contradiction:
+                    st.session_state.feedback_message = "❌ 答案错误！该方程组无解，请点击'无解'按钮"
+                    st.session_state.feedback_color = "error"
+                else:
+                    # 检查自由变量标记
+                    num_free_vars = m - rank
+                    system_free_vars = [j for j in range(m) if j not in pivot_cols]
+                    
+                    if num_free_vars > 0:
+                        # 有自由变量的情况
+                        if set(free_vars_selected) != set(system_free_vars):
+                            if len(free_vars_selected) == 0:
+                                st.session_state.feedback_message = "⚠️ 方程组有无穷多解，请勾选自由变量"
+                                st.session_state.feedback_color = "warning"
+                            else:
+                                st.session_state.feedback_message = "❌ 自由变量标记有误，正确答案如下："
+                                st.session_state.feedback_color = "error"
+                        else:
+                            # 用户正确标记了自由变量，检查系数
+                            if not coefficient_entries:
+                                st.session_state.feedback_message = "✅ 太棒了！你正确识别了自由变量！点击查看完整通解"
+                                st.session_state.feedback_color = "success"
+                            else:
+                                # 构建系统的通解表达式
+                                solution_expr = {}
+                                for i in range(rank):
+                                    pivot_col = pivot_cols[i]
+                                    expr = {'const': augmented[i][-1], 'coeffs': {}}
+                                    for free_idx in system_free_vars:
+                                        expr['coeffs'][free_idx] = -augmented[i][free_idx]
+                                    solution_expr[pivot_col] = expr
+                                
+                                # 检查用户输入的系数
+                                all_correct = True
+                                for pivot_col, user_coeffs in coefficient_entries.items():
+                                    if pivot_col not in solution_expr:
+                                        continue
+                                    
+                                    system_expr = solution_expr[pivot_col]
+                                    
+                                    # 检查每个自由变量的系数
+                                    for free_idx, user_coeff in user_coeffs.items():
+                                        if free_idx == 'const':
+                                            continue
+                                        
+                                        try:
+                                            user_coeff_frac = Fraction(str(user_coeff)).limit_denominator(10000)
+                                            system_coeff = system_expr['coeffs'].get(free_idx, Fraction(0))
+                                            
+                                            if user_coeff_frac != system_coeff:
+                                                all_correct = False
+                                                break
+                                        except:
+                                            all_correct = False
+                                            break
+                                    
+                                    if not all_correct:
+                                        break
+                                    
+                                    # 检查常数项
+                                    const_entry = user_coeffs.get('const')
+                                    if const_entry is not None:
+                                        try:
+                                            user_const = Fraction(str(const_entry)).limit_denominator(10000)
+                                            system_const = system_expr['const']
+                                            
+                                            if user_const != system_const:
+                                                all_correct = False
+                                                break
+                                        except:
+                                            all_correct = False
+                                            break
+                                
+                                if all_correct:
+                                    st.session_state.feedback_message = " 太棒了！完全正确！你是数学天才！"
+                                    st.session_state.feedback_color = "success"
+                                else:
+                                    st.session_state.feedback_message = "❌ 系数有误，正确答案如下："
+                                    st.session_state.feedback_color = "error"
+                    else:
+                        # 唯一解的情况
+                        has_input = any(v.strip() for v in user_answers.values())
+                        
+                        if not has_input:
+                            st.session_state.feedback_message = " 您未输入答案，将直接显示解答"
+                            st.session_state.feedback_color = "info"
+                        else:
+                            # 检查唯一解的答案
+                            solution = [Fraction(0)] * m
+                            for i in range(rank):
+                                col = pivot_cols[i]
+                                solution[col] = augmented[i][-1]
+                            
+                            correct = True
+                            for i in range(m):
+                                if user_answers.get(i, '').strip():
+                                    try:
+                                        user_val = Fraction(user_answers[i]).limit_denominator(10000)
+                                        if user_val != solution[i]:
+                                            correct = False
+                                            break
+                                    except:
+                                        correct = False
+                                        break
+                            
+                            if correct:
+                                st.session_state.feedback_message = " 太棒了！完全正确！你是数学天才！"
+                                st.session_state.feedback_color = "success"
+                            else:
+                                st.session_state.feedback_message = "❌ 答案有误，正确答案如下："
+                                st.session_state.feedback_color = "error"
+                
+                # 保存用户输入
+                st.session_state.user_answers = user_answers
+                st.session_state.free_vars_selected = free_vars_selected
+                
+            except Exception as e:
+                st.session_state.feedback_message = f"❌ 验证过程中出错：{str(e)}"
+                st.session_state.feedback_color = "error"
+
+with col_show:
+    if st.button("📖 显示答案", use_container_width=True):
+        if 'solution_result' in st.session_state:
+            st.session_state.show_solution = True
+            st.session_state.feedback_message = ""
+            st.session_state.feedback_color = ""
+        else:
+            st.warning("请先点击'求解方程组'按钮")
+
+with col_no_solution:
+    if st.button("❌ 无解", use_container_width=True):
+        if 'solution_result' not in st.session_state:
+            st.warning("请先点击'求解方程组'按钮！")
+        else:
+            # 检查是否真的无解
+            try:
+                matrix = []
+                constants = []
+                for eq_data in equations_data:
+                    matrix.append(eq_data['coeffs'])
+                    constants.append(eq_data['const'])
+                
+                augmented, pivot_cols, steps = gauss_elimination(matrix, constants)
+                n = len(matrix)
+                rank = len(pivot_cols)
+                
+                has_contradiction = False
+                if not is_homogeneous:
+                    for i in range(rank, n):
+                        if augmented[i][-1] != 0:
+                            has_contradiction = True
+                            break
+                
+                if has_contradiction:
+                    st.session_state.feedback_message = "✅ 回答正确！该方程组确实无解！你太厉害了！"
+                    st.session_state.feedback_color = "success"
+                else:
+                    st.session_state.feedback_message = "❌ 错误！该方程组有解，点击'显示答案'查看正确解法"
+                    st.session_state.feedback_color = "error"
+                    st.session_state.show_solution = True
+                    
+            except Exception as e:
+                st.session_state.feedback_message = f"❌ 验证过程中出错：{str(e)}"
+                st.session_state.feedback_color = "error"
+
+# 显示反馈消息
+if st.session_state.feedback_message:
+    if st.session_state.feedback_color == "success":
+        st.success(st.session_state.feedback_message)
+    elif st.session_state.feedback_color == "error":
+        st.error(st.session_state.feedback_message)
+    elif st.session_state.feedback_color == "warning":
+        st.warning(st.session_state.feedback_message)
+    elif st.session_state.feedback_color == "info":
+        st.info(st.session_state.feedback_message)
+
 # 求解按钮
 st.markdown("---")
 col_solve, col_show = st.columns(2)
